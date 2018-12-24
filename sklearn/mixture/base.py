@@ -73,7 +73,7 @@ class BaseMixture(six.with_metaclass(ABCMeta, DensityMixin, BaseEstimator)):
 
     def __init__(self, n_components, tol, reg_covar,
                  max_iter, n_init, init_params, random_state, warm_start,
-                 verbose, verbose_interval):
+                 verbose, verbose_interval, group=None):
         self.n_components = n_components
         self.tol = tol
         self.reg_covar = reg_covar
@@ -84,6 +84,7 @@ class BaseMixture(six.with_metaclass(ABCMeta, DensityMixin, BaseEstimator)):
         self.warm_start = warm_start
         self.verbose = verbose
         self.verbose_interval = verbose_interval
+        self.group = group
 
     def _check_initial_parameters(self, X):
         """Check values of the basic parameters.
@@ -146,7 +147,8 @@ class BaseMixture(six.with_metaclass(ABCMeta, DensityMixin, BaseEstimator)):
         if self.init_params == 'kmeans':
             resp = np.zeros((n_samples, self.n_components))
             label = cluster.KMeans(n_clusters=self.n_components, n_init=1,
-                                   random_state=random_state).fit(X).labels_
+                                   random_state=random_state, algorithm='full',
+                                   group=self.group).fit(X).labels_
             resp[np.arange(n_samples), label] = 1
         elif self.init_params == 'random':
             resp = random_state.rand(n_samples, self.n_components)
@@ -456,7 +458,21 @@ class BaseMixture(six.with_metaclass(ABCMeta, DensityMixin, BaseEstimator)):
         -------
         weighted_log_prob : array, shape (n_samples, n_component)
         """
-        return self._estimate_log_prob(X) + self._estimate_log_weights()
+
+        log_probs = self._estimate_log_prob(X)
+        log_weights = self._estimate_log_weights()
+
+        if self.group is not None and self.group > 1:
+            lp_group = log_probs.reshape(log_probs.shape[0] // self.group, self.group,
+                                                log_probs.shape[1])
+            lp_group = lp_group.mean(1)[:, None].repeat(self.group, axis=1)
+            lp_group = lp_group.reshape(
+                lp_group.shape[0] * lp_group.shape[1],
+                lp_group.shape[2])
+            
+            log_probs = lp_group
+
+        return log_probs + log_weights
 
     @abstractmethod
     def _estimate_log_weights(self):
@@ -505,6 +521,7 @@ class BaseMixture(six.with_metaclass(ABCMeta, DensityMixin, BaseEstimator)):
         """
         weighted_log_prob = self._estimate_weighted_log_prob(X)
         log_prob_norm = logsumexp(weighted_log_prob, axis=1)
+
         with np.errstate(under='ignore'):
             # ignore underflow
             log_resp = weighted_log_prob - log_prob_norm[:, np.newaxis]

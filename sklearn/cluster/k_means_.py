@@ -19,7 +19,7 @@ import scipy.sparse as sp
 
 from ..base import BaseEstimator, ClusterMixin, TransformerMixin
 from ..metrics.pairwise import euclidean_distances
-from ..metrics.pairwise import pairwise_distances_argmin_min
+from ..metrics.pairwise import pairwise_distances_argmin_min, pairwise_distances
 from ..utils.extmath import row_norms, squared_norm, stable_cumsum
 from ..utils.sparsefuncs_fast import assign_rows_csr
 from ..utils.sparsefuncs import mean_variance_axis
@@ -186,7 +186,7 @@ def _check_sample_weight(X, sample_weight):
 def k_means(X, n_clusters, sample_weight=None, init='k-means++',
             precompute_distances='auto', n_init=10, max_iter=300,
             verbose=False, tol=1e-4, random_state=None, copy_x=True,
-            n_jobs=None, algorithm="auto", return_n_iter=False):
+            n_jobs=None, algorithm="auto", return_n_iter=False, group=None):
     """K-means clustering algorithm.
 
     Read more in the :ref:`User Guide <k_means>`.
@@ -377,7 +377,7 @@ def k_means(X, n_clusters, sample_weight=None, init='k-means++',
                 X, sample_weight, n_clusters, max_iter=max_iter, init=init,
                 verbose=verbose, precompute_distances=precompute_distances,
                 tol=tol, x_squared_norms=x_squared_norms,
-                random_state=random_state)
+                random_state=random_state, group=group)
             # determine if these results are the best so far
             if best_inertia is None or inertia < best_inertia:
                 best_labels = labels.copy()
@@ -394,7 +394,7 @@ def k_means(X, n_clusters, sample_weight=None, init='k-means++',
                                    precompute_distances=precompute_distances,
                                    x_squared_norms=x_squared_norms,
                                    # Change seed to ensure variety
-                                   random_state=seed)
+                                   random_state=seed, group=group)
             for seed in seeds)
         # Get results with the lowest inertia
         labels, inertia, centers, n_iters = zip(*results)
@@ -425,7 +425,7 @@ def k_means(X, n_clusters, sample_weight=None, init='k-means++',
 def _kmeans_single_elkan(X, sample_weight, n_clusters, max_iter=300,
                          init='k-means++', verbose=False, x_squared_norms=None,
                          random_state=None, tol=1e-4,
-                         precompute_distances=True):
+                         precompute_distances=True, group=None):
     if sp.issparse(X):
         raise TypeError("algorithm='elkan' not supported for sparse input X")
     random_state = check_random_state(random_state)
@@ -454,7 +454,7 @@ def _kmeans_single_elkan(X, sample_weight, n_clusters, max_iter=300,
 def _kmeans_single_lloyd(X, sample_weight, n_clusters, max_iter=300,
                          init='k-means++', verbose=False, x_squared_norms=None,
                          random_state=None, tol=1e-4,
-                         precompute_distances=True):
+                         precompute_distances=True, group=None):
     """A single run of k-means, assumes preparation completed prior.
 
     Parameters
@@ -543,7 +543,7 @@ def _kmeans_single_lloyd(X, sample_weight, n_clusters, max_iter=300,
         labels, inertia = \
             _labels_inertia(X, sample_weight, x_squared_norms, centers,
                             precompute_distances=precompute_distances,
-                            distances=distances)
+                            distances=distances, group=group)
 
         # computation of the means is also called the M-step of EM
         if sp.issparse(X):
@@ -575,13 +575,13 @@ def _kmeans_single_lloyd(X, sample_weight, n_clusters, max_iter=300,
         best_labels, best_inertia = \
             _labels_inertia(X, sample_weight, x_squared_norms, best_centers,
                             precompute_distances=precompute_distances,
-                            distances=distances)
+                            distances=distances, group=group)
 
     return best_labels, best_inertia, best_centers, i + 1
 
 
 def _labels_inertia_precompute_dense(X, sample_weight, x_squared_norms,
-                                     centers, distances):
+                                     centers, distances, group=None):
     """Compute labels and inertia using a full distance matrix.
 
     This will overwrite the 'distances' array in-place.
@@ -617,19 +617,32 @@ def _labels_inertia_precompute_dense(X, sample_weight, x_squared_norms,
     # Breakup nearest neighbor distance computation into batches to prevent
     # memory blowup in the case of a large number of samples and clusters.
     # TODO: Once PR #7383 is merged use check_inputs=False in metric_kwargs.
-    labels, mindist = pairwise_distances_argmin_min(
-        X=X, Y=centers, metric='euclidean', metric_kwargs={'squared': True})
+
+    if group is None:
+        labels, mindist = pairwise_distances_argmin_min(
+            X=X, Y=centers, metric='euclidean', metric_kwargs={'squared': True})
+    else:
+        assert group > 1
+        # group = 2
+        dists = pairwise_distances(X=X, Y=centers, metric='l2')
+        dists_grouped = dists.reshape(dists.shape[0]//group, group, dists.shape[1])
+        dists_grouped = dists_grouped.mean(1)[:, None].repeat(group, axis=1)
+        dists_grouped = dists_grouped.reshape(dists_grouped.shape[0] * dists_grouped.shape[1], dists_grouped.shape[2])
+
+        labels = dists_grouped.argmin(axis=1)
+        mindist = dists_grouped[np.arange(dists_grouped.shape[0]), labels]
+
     # cython k-means code assumes int32 inputs
     labels = labels.astype(np.int32)
     if n_samples == distances.shape[0]:
         # distances will be changed in-place
         distances[:] = mindist
     inertia = (mindist * sample_weight).sum()
+
     return labels, inertia
 
-
 def _labels_inertia(X, sample_weight, x_squared_norms, centers,
-                    precompute_distances=True, distances=None):
+                    precompute_distances=True, distances=None, group=None):
     """E step of the K-means EM algorithm.
 
     Compute the labels and the inertia of the given samples and centers.
@@ -681,10 +694,11 @@ def _labels_inertia(X, sample_weight, x_squared_norms, centers,
         if precompute_distances:
             return _labels_inertia_precompute_dense(X, sample_weight,
                                                     x_squared_norms, centers,
-                                                    distances)
+                                                    distances, group=group)
         inertia = _k_means._assign_labels_array(
             X, sample_weight, x_squared_norms, centers, labels,
             distances=distances)
+
     return labels, inertia
 
 
@@ -915,7 +929,7 @@ class KMeans(BaseEstimator, ClusterMixin, TransformerMixin):
     def __init__(self, n_clusters=8, init='k-means++', n_init=10,
                  max_iter=300, tol=1e-4, precompute_distances='auto',
                  verbose=0, random_state=None, copy_x=True,
-                 n_jobs=None, algorithm='auto'):
+                 n_jobs=None, algorithm='auto', group=None):
 
         self.n_clusters = n_clusters
         self.init = init
@@ -928,6 +942,11 @@ class KMeans(BaseEstimator, ClusterMixin, TransformerMixin):
         self.copy_x = copy_x
         self.n_jobs = n_jobs
         self.algorithm = algorithm
+        self.group = group
+
+        if group is not None and group > 1:
+            assert precompute_distances, \
+                'must use precompute_distances == True for group > 1'
 
     def _check_test_data(self, X):
         X = check_array(X, accept_sparse='csr', dtype=FLOAT_DTYPES)
@@ -968,7 +987,7 @@ class KMeans(BaseEstimator, ClusterMixin, TransformerMixin):
                 precompute_distances=self.precompute_distances,
                 tol=self.tol, random_state=random_state, copy_x=self.copy_x,
                 n_jobs=self.n_jobs, algorithm=self.algorithm,
-                return_n_iter=True)
+                return_n_iter=True, group=self.group)
         return self
 
     def fit_predict(self, X, y=None, sample_weight=None):

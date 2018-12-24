@@ -590,18 +590,19 @@ class GaussianMixture(BaseMixture):
                  reg_covar=1e-6, max_iter=100, n_init=1, init_params='kmeans',
                  weights_init=None, means_init=None, precisions_init=None,
                  random_state=None, warm_start=False,
-                 verbose=0, verbose_interval=10):
+                 verbose=0, verbose_interval=10, group=None):
         super(GaussianMixture, self).__init__(
             n_components=n_components, tol=tol, reg_covar=reg_covar,
             max_iter=max_iter, n_init=n_init, init_params=init_params,
             random_state=random_state, warm_start=warm_start,
-            verbose=verbose, verbose_interval=verbose_interval)
+            verbose=verbose, verbose_interval=verbose_interval, group=group)
 
         self.covariance_type = covariance_type
         self.weights_init = weights_init
         self.means_init = means_init
         self.precisions_init = precisions_init
-
+        self.group = group
+        
     def _check_parameters(self, X):
         """Check the Gaussian mixture parameters are well defined."""
         _, n_features = X.shape
